@@ -33,7 +33,6 @@ pub fn run(cli: cli::GetTEF) -> Result<()> {
     let mut file = cli.jsonl_file;
 
     if fs::exists(&file).ok() != Some(true) {
-        dbg!(&file);
         if file == "latest" {
             file = find_latest_file(cli.dir.as_ref())?;
         } else {
