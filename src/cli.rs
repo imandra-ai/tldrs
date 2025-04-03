@@ -3,6 +3,9 @@ pub struct List {
     /// Storage directory
     #[arg(short = 'd', long = "dir")]
     pub dir: Option<String>,
+    /// List more info about each file
+    #[arg(short = 'l')]
+    pub long: bool,
 }
 
 #[derive(Debug, clap::Parser)]

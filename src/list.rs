@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use byte_unit::{Byte, UnitType};
 
 use crate::{cli, utils};
 
@@ -35,10 +36,18 @@ pub fn run(cli: cli::List) -> Result<()> {
     files.sort();
 
     for f in files {
-        let Some(f) = f.as_path().to_str() else {
+        let Some(f_str) = f.as_path().to_str() else {
             continue;
         };
-        println!("{}", f)
+        print!("{}", f_str);
+        if cli.long {
+            if let Ok(info) = std::fs::metadata(f) {
+                let b = Byte::from_u64(info.len());
+                let b_approx = b.get_appropriate_unit(UnitType::Binary);
+                print!(" {b_approx:#.2}");
+            }
+        }
+        println!("");
     }
 
     Ok(())
