@@ -56,6 +56,7 @@ Each client process should open one connection to `tldrs` and send these message
 | `OPEN <trace-id>` |  mandatory first message |
 | `{"ph": "X", …}` | a normal TEF event |
 | `EMIT_TEF <path/to/trace.json>` | optional last message |
+| `EMIT_TEF_AT_EXIT <path/to/trace.json>` | emit TEF into this file when all clients for trace exited |
 | `DIE` | ask tldrs to exit asap |
 | `DIE_WHEN_IDLE` | ask tldrs to exit when it has no clients |
 
@@ -69,3 +70,8 @@ Events can be sent normally after the first `OPEN`, one json event per line.
 At the end, one of the processes can send `EMIT_TEF /foo/trace.json` to have the server
 write the whole trace, in TEF format (not `.jsonl`! rather, a single json object)
 to the file at `/foo/trace.json`.
+`EMIT_TEF_AT_EXIT /foo/trace.json` can be sent at any time but will only have an effect
+when all clients for the current trace have exited.
+
+`DIE` asks the daemon to exit immediately; `DIE_WHEN_IDLE` instructs it to exit
+once all clients (including the current one) have disconnected.

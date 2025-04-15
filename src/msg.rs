@@ -9,6 +9,10 @@ pub enum Msg<'a> {
         /// Copy the current trace as a .json, TEF formatted file in `path`
         path: &'a str,
     },
+    EmitTefAtExit {
+        /// Copy the current trace as a .json, TEF formatted file in `path`
+        path: &'a str,
+    },
     Add {
         json: &'a str,
     },
@@ -38,6 +42,8 @@ pub fn decode_line<'a>(line: &'a str) -> Msg<'a> {
         DieWhenIdle
     } else if let Some(rest) = line.strip_prefix("EMIT_TEF ") {
         EmitTef { path: rest.trim() }
+    } else if let Some(rest) = line.strip_prefix("EMIT_TEF_AT_EXIT ") {
+        EmitTefAtExit { path: rest.trim() }
     } else if !line.is_empty() && line.as_bytes()[0] == b'{' {
         if line.as_bytes()[line.as_bytes().len() - 1] != b'}' {
             return ParseError {

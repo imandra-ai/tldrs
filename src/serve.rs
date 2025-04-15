@@ -1,12 +1,12 @@
 use std::{
     collections::{
-        hash_map::{self},
-        HashMap,
+        hash_map::{self, Entry},
+        HashMap, HashSet,
     },
     fs,
     io::{BufRead, BufReader, BufWriter, Read, Write},
     os::unix::net::UnixListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{
         atomic::{self, AtomicBool},
@@ -36,6 +36,8 @@ struct TraceFile {
     path: PathBuf,
     /// Opened file descriptor to the file
     out: Mutex<BufWriter<fs::File>>,
+    /// Files into which to emit TEF when the trace is closed
+    files_to_write_at_exit: Mutex<HashSet<PathBuf>>,
 }
 
 struct State {
@@ -69,6 +71,7 @@ impl State {
         path
     }
 
+    /// Obtain or create handle for this trace
     fn get_trace_file(&self, trace_id: impl Into<TraceID>) -> Result<Arc<TraceFile>> {
         let trace_id = trace_id.into();
 
@@ -91,6 +94,7 @@ impl State {
                     trace_id,
                     path,
                     out: Mutex::new(out),
+                    files_to_write_at_exit: Mutex::new(HashSet::new()),
                 });
 
                 e.insert(trf.clone());
@@ -98,6 +102,33 @@ impl State {
             }
         };
         Ok(trf)
+    }
+
+    fn close_trace_file(&self, trace_id: &TraceID) -> Result<()> {
+        let mut tr_local: Option<TraceFile> = None;
+
+        {
+            // see if the trace has no references besides `self.files`
+            let mut files = self.files.lock().unwrap();
+            let entry = files.entry(trace_id.clone());
+            if let Entry::Occupied(e) = entry {
+                let we_are_last = Arc::strong_count(&e.get()) == 1;
+                if we_are_last {
+                    // remove from map
+                    let tr = e.remove();
+                    log::debug!("close trace file for {:?}", &tr.trace_id);
+
+                    tr_local = Arc::into_inner(tr);
+                    assert!(tr_local.is_some());
+                }
+            }
+        }
+
+        if let Some(tr) = tr_local {
+            tr.emit_trace_files()?;
+        }
+
+        Ok(())
     }
 
     fn close_all_force(&self) {
@@ -115,6 +146,14 @@ impl State {
     fn kill(&self) {
         // try to exit gracefully
         self.active.store(false, atomic::Ordering::SeqCst);
+
+        // emit files
+        for (_, f) in self.files.lock().unwrap().iter() {
+            if let Err(err) = f.emit_trace_files() {
+                log::error!("Error while writing trace file(s): {err}")
+            }
+        }
+
         self.close_all_force();
 
         // if we don't exit in 10s, die less cleanly
@@ -127,7 +166,7 @@ impl State {
 }
 
 impl TraceFile {
-    fn emit_tef(&self, path: PathBuf, len: u64) -> Result<()> {
+    fn emit_tef(&self, path: &Path, len: u64) -> Result<()> {
         log::info!(
             "Emit a TEF trace into {path:?} for {len} bytes of trace {:?}",
             &self.trace_id
@@ -142,6 +181,31 @@ impl TraceFile {
         let mut writer = BufWriter::with_capacity(16 * 1024, file_out);
 
         utils::emit_tef(&mut reader, &mut writer)
+    }
+
+    fn len(&self) -> Result<u64> {
+        // flush file, measure how long it is
+        let mut out = self.out.lock().unwrap();
+        out.flush()?;
+
+        let file = out.get_ref();
+        let len = file.metadata()?.len();
+        Ok(len)
+    }
+
+    fn emit_trace_files(&self) -> Result<()> {
+        // write the file at last.
+        let len = self.len()?;
+
+        log::debug!("emitting trace files for {:?}", &self.path);
+        for f in self.files_to_write_at_exit.lock().unwrap().iter() {
+            log::info!("Copying trace file {:?} into {:?}", &self.path, f);
+            // let out = fs::OpenOptions::new().write(true).truncate(true).open(&f)?;
+            if let Err(err) = self.emit_tef(f, len) {
+                log::error!("Error when copying trace file into {:?}: {}", f, err);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -182,6 +246,21 @@ fn handle_client(st: Arc<State>, mut client: impl BufRead) -> Result<()> {
             msg::Msg::DieWhenIdle => {
                 st.die_when_idle.store(true, atomic::Ordering::SeqCst);
             }
+            msg::Msg::EmitTefAtExit { path } => {
+                let Some(ref trace_file) = &trace_file else {
+                    continue;
+                };
+
+                // might have to write into a file
+                match PathBuf::from_str(path) {
+                    Ok(p) => {
+                        log::debug!("will emit TEF into {p:?} at exit");
+                        let mut files = trace_file.files_to_write_at_exit.lock().unwrap();
+                        files.insert(p);
+                    }
+                    Err(err) => log::error!("Cannot parse path {path:?}: {err}"),
+                }
+            }
             msg::Msg::Open { trace_id } => {
                 log::debug!("Opening trace file for trace_id={trace_id:?}");
                 trace_file = Some(st.get_trace_file(trace_id)?);
@@ -212,7 +291,7 @@ fn handle_client(st: Arc<State>, mut client: impl BufRead) -> Result<()> {
 
                 // emit file in the background
                 thread::spawn(move || {
-                    if let Err(e) = trf.emit_tef(path, len) {
+                    if let Err(e) = trf.emit_tef(&path, len) {
                         log::error!(
                             "Error when emitting a TEF file for trace {:?}: {e:?}",
                             &trf.trace_id
@@ -234,9 +313,17 @@ fn handle_client(st: Arc<State>, mut client: impl BufRead) -> Result<()> {
     }
 
     if let Some(tr) = trace_file {
+        let trace_id = tr.trace_id.clone();
+
         // flush on exit
-        let mut out = tr.out.lock().unwrap();
-        out.flush().context("flushing trace file")?;
+        {
+            log::debug!("flushing file {:?}", &tr.path);
+            let mut out = tr.out.lock().unwrap();
+            out.flush().context("flushing trace file")?;
+        }
+        drop(tr);
+
+        st.close_trace_file(&trace_id)?;
     }
 
     Ok(())
